@@ -7,6 +7,6 @@
 
 import unittest
 
-import nim_xgboost
+import nimxgb
 test "can add":
   check add(5, 5) == 10

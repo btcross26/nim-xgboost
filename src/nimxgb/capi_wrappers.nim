@@ -1,12 +1,14 @@
-# Train an XGBoost model using the C API directly
-#
-# This requires wrapping the functions and types that we will use from the
-# XGBoost C API, then calling the wrapped functionality accordingly to load data
-# and train the model. The safe_xgboost #define procedure is replaced with a
-# template that is used to wrap the calls to XGBoost procedures.
+## Train an XGBoost model using the C API directly
+##
+## This requires wrapping the functions and types that we will use from the
+## XGBoost C API, then calling the wrapped functionality accordingly to load data
+## and train the model. The safe_xgboost #define procedure is replaced with a
+## template that is used to wrap the calls to XGBoost procedures.
 
 # author: Benjamin Cross
 # created: 2021-03-31
+
+import macros
 
 when defined(macos) or defined(macosx):
   const libName: string = "libxgboost.dylib"
@@ -15,27 +17,15 @@ elif defined(linux):
 elif defined(windows):
   const libName: string = "libxgboost.dll"
 
-# use a Nim template to (for the most part) mimic the #define safe_xgboost stmt
-# in the XGBoost C API code
-template safe_xgboost*(procCall: untyped) =
-  ## Mimic the safe_xgboost #define procedure in the C API
-  ##
-  ## Usage for some arbitrary call, XGBFunctionCall(...)
-  ##   safe_xgboost: XGBFunctionCall(...)
-  let err: cint = procCall
-  if err != 0:
-    let pos = instantiationInfo()   # to get the current file and line number
-    # use stderr in Nim to write to stderr, as opposed to fprintf in safe_xgboost
-    stderr.writeLine("$1:$2: error in $3: $4\n" % [pos.filename, $pos.line,
-      "xgboost api call", $XGBGetLastError()])
-    quit(1)   # replaces C++ exit(1)
-
 # Wrappers for using the XGBoost C API as in the example here
 # https://xgboost.readthedocs.io/en/latest/dev/c__api_8h.html
-{.push header: "xgboost/c_api.h", importc, dynlib: libName.}
+{.push cdecl, header: "xgboost/c_api.h", importc, dynlib: libName.}
 type
-  DMatrixHandle* = pointer   # pointer can be used for void * vs. ptr type
-  BoosterHandle* = pointer
+  # void pointer types - the distinct keyword here helps to make these more type
+  # safe than without, as then any void pointer could be used in a wrapped
+  # function call without being caught by the compiler.
+  DMatrixHandle* = distinct pointer
+  BoosterHandle* = distinct pointer
   bst_ulong* = culonglong
 
 # API function wrappers
@@ -96,3 +86,37 @@ proc XGBoosterLoadModel*(handle: BoosterHandle, fname: cstring): cint
 proc XGBoosterLoadModelFromBuffer*(handle: BoosterHandle, buf: pointer,
   len: bst_ulong): cint
 {.pop.}
+
+
+# create error type for XGB to be raised in safe_xgboost template
+type
+  XGBError* = object of CatchableError
+
+# use a Nim template to (for the most part) mimic the #define safe_xgboost stmt
+# in the XGBoost C API code
+template safe_xgboost_call*(procCall: untyped) =
+  ## Mimic the safe_xgboost #define procedure in the C API
+  ##
+  ## Usage for some arbitrary call, XGBFunctionCall(...)
+  ##   safe_xgboost: XGBFunctionCall(...)
+  # let err: cint = procCall
+  let err: cint = procCall
+  if err != 0:
+    let
+      pos = instantiationInfo()   # to get the current file and line number
+      errMsg: string = $XGBGetLastError()
+    # use stderr in Nim to write to stderr, as opposed to fprintf in safe_xgboost
+    stderr.writeLine("$1:$2: error in $3: $4\n" % [pos.filename, $pos.line,
+      "xgboost api call", errMsg])
+    # raise exception
+    raise newException(XGBError, errMsg)
+    # quit(1)   # replaces C++ exit(1)
+
+
+# Macro to wrap multiple xgboost calls if needed
+macro safe_xgboost*(stmts: untyped): untyped =
+  ## Create a safe_xgboost block that can have multiple XGB calls in a row
+  ## within the same block.
+  result = newStmtList()
+  for stmt in items(stmts):
+    result.add(newCall(newIdentNode("safe_xgboost_call"), stmt))
